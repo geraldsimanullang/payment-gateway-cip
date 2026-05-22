@@ -46,3 +46,24 @@ logging:
   level:
     com.cip.paymentgateway: DEBUG
     org.hibernate.SQL: DEBUG
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      billerAggregator:
+        failure-rate-threshold: 50
+        slow-call-rate-threshold: 50
+        slow-call-duration-threshold: 3s
+        minimum-number-of-calls: 5
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        record-exceptions:
+          - feign.FeignException
+
+  retry:
+    instances:
+      billerAggregator:
+        max-attempts: 3
+        wait-duration: 2s
+        retry-exceptions:
+          - feign.FeignException
