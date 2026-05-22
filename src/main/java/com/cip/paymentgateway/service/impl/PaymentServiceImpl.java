@@ -16,6 +16,8 @@ import com.cip.paymentgateway.kafka.PaymentEventProducer;
 import com.cip.paymentgateway.repository.TransactionRepository;
 import com.cip.paymentgateway.service.PaymentService;
 import feign.FeignException;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -42,7 +44,8 @@ public class PaymentServiceImpl implements PaymentService {
         // 1. Cek duplicate order
         if (transactionRepository.existsByOrderId(request.getOrderId())) {
             throw new DuplicateOrderException(
-                    "Order already exists: " + request.getOrderId());
+                "Order already exists: " + request.getOrderId()
+            );
         }
 
         // 2. Simpan transaksi dengan status PENDING
@@ -62,40 +65,42 @@ public class PaymentServiceImpl implements PaymentService {
         try {
             // 3. Kirim debit request ke Core Banking
             log.info("Sending debit request to core banking for account: {}",
-                    request.getAccount());
+                request.getAccount());
 
             CoreBankingResponse cbResponse = coreBankingClient.debit(
                     CoreBankingRequest.builder()
                             .account(request.getAccount())
                             .amount(request.getAmount())
-                            .build());
+                            .build()
+            );
 
             // 4. Cek response Core Banking
             if (!"SUCCESS".equals(cbResponse.getStatus())) {
-                log.warn("Core banking returned failed status for orderId: {}",
-                        request.getOrderId());
+                log.warn("Core banking returned failed for orderId: {}",
+                    request.getOrderId());
                 return failTransaction(transaction, "Insufficient balance");
             }
 
             transaction.setCorebankReference(cbResponse.getCorebankReference());
             log.info("Core banking success, reference: {}",
-                    cbResponse.getCorebankReference());
+                cbResponse.getCorebankReference());
 
-            // 5. Forward ke Biller Aggregator
+            // 5. Forward ke Biller Aggregator (dengan circuit breaker)
             log.info("Forwarding payment to biller for orderId: {}",
-                    request.getOrderId());
+                request.getOrderId());
 
-            BillerResponse billerResponse = billerAggregatorClient.pay(
+            BillerResponse billerResponse = callBillerAggregator(
                     BillerRequest.builder()
                             .orderId(request.getOrderId())
                             .amount(request.getAmount())
                             .paymentMethod(request.getPaymentMethod())
-                            .build());
+                            .build()
+            );
 
             // 6. Cek response Biller
             if (!"SUCCESS".equals(billerResponse.getStatus())) {
-                log.warn("Biller returned failed status for orderId: {}",
-                        request.getOrderId());
+                log.warn("Biller returned failed for orderId: {}",
+                    request.getOrderId());
                 return failTransaction(transaction, "Biller payment failed");
             }
 
@@ -119,7 +124,7 @@ public class PaymentServiceImpl implements PaymentService {
 
         } catch (FeignException e) {
             log.error("External service error for orderId: {}, error: {}",
-                    request.getOrderId(), e.getMessage());
+                request.getOrderId(), e.getMessage());
             return failTransaction(transaction, "External service unavailable");
         }
     }
@@ -130,7 +135,8 @@ public class PaymentServiceImpl implements PaymentService {
 
         Transaction transaction = transactionRepository.findById(id)
                 .orElseThrow(() -> new TransactionNotFoundException(
-                        "Transaction not found: " + id));
+                    "Transaction not found: " + id
+                ));
 
         return PaymentResponse.builder()
                 .transactionId(transaction.getId().toString())
@@ -141,13 +147,25 @@ public class PaymentServiceImpl implements PaymentService {
                 .build();
     }
 
-    // Helper method untuk update transaksi menjadi FAILED
+    @CircuitBreaker(name = "billerAggregator", fallbackMethod = "billerFallback")
+    @Retry(name = "billerAggregator")
+    public BillerResponse callBillerAggregator(BillerRequest request) {
+        return billerAggregatorClient.pay(request);
+    }
+
+    public BillerResponse billerFallback(BillerRequest request, Exception ex) {
+        log.error("Biller circuit breaker triggered, error: {}", ex.getMessage());
+        return BillerResponse.builder()
+                .status("FAILED")
+                .build();
+    }
+
     private PaymentResponse failTransaction(Transaction transaction, String message) {
         transaction.setStatus(TransactionStatus.FAILED);
         transactionRepository.save(transaction);
 
         log.warn("Transaction failed for orderId: {}, reason: {}",
-                transaction.getOrderId(), message);
+            transaction.getOrderId(), message);
 
         return PaymentResponse.builder()
                 .transactionId(transaction.getId().toString())
