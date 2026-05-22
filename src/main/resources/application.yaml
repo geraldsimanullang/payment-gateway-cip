@@ -1,3 +1,48 @@
 spring:
   application:
     name: payment-gateway
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/payment_gateway}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  kafka:
+    bootstrap-servers: ${KAFKA_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8080/realms/payment}
+
+server:
+  port: 8080
+
+corebanking:
+  url: ${COREBANK_URL:http://localhost:8081}
+
+biller:
+  url: ${BILLER_URL:http://localhost:8082}
+
+logging:
+  level:
+    com.cip.paymentgateway: DEBUG
+    org.hibernate.SQL: DEBUG
